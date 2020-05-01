@@ -24,13 +24,15 @@ class CRabbitMQ
 {
 public:
     explicit CRabbitMQ(const RabbitMQ_INFO& baseInfo);
+    ~CRabbitMQ();
 public:
     bool pub_msg(const std::string strMsg);
     bool start_recv_msg(llong timeOutMsec = 0);
     void stop_recv_msg();
-
 private:
-    bool init_rabbit_mq();
+    enum WORK_TYPE{PUB, RECV};
+private:
+    bool init_rabbit_mq(WORK_TYPE flag/*true:pub false:recv*/);
     bool exit_rabbit_mq();
     void recv_work_thread();
 
@@ -43,7 +45,8 @@ private:
     std::thread*                m_work_thread;
 
     std::string                 m_str_consumer;
-    AmqpClient::Channel::ptr_t  m_channel;
+    AmqpClient::Channel::ptr_t  m_channelRecv;
+    AmqpClient::Channel::ptr_t  m_channelPub;
 
 };
 

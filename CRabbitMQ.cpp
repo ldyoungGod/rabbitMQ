@@ -2,7 +2,7 @@
 #include <string.h>
 #include <exception>
 #include <sys/timeb.h>
-CRabbitMQ::CRabbitMQ(const RabbitMQ_INFO &baseInfo):m_channel(nullptr)
+CRabbitMQ::CRabbitMQ(const RabbitMQ_INFO &baseInfo):m_channelRecv(nullptr)
 {
     m_basicInfo.exchange        = baseInfo.exchange;
     m_basicInfo.m_mq_host       = baseInfo.m_mq_host;
@@ -15,19 +15,26 @@ CRabbitMQ::CRabbitMQ(const RabbitMQ_INFO &baseInfo):m_channel(nullptr)
     m_basicInfo.type            = baseInfo.type;
 }
 
+CRabbitMQ::~CRabbitMQ()
+{
+    this->stop_recv_msg();
+}
+
 bool CRabbitMQ::pub_msg(const std::string strMsg)
 {
     try
     {
-        bool bSuc = this->init_rabbit_mq();
+        bool bSuc = this->init_rabbit_mq(PUB);
         if (bSuc == false)
         {
             return false;
         }
-        this->m_channel->BasicPublish(
+
+        AmqpClient::BasicMessage::ptr_t msgPtr = AmqpClient::BasicMessage::Create(strMsg);
+        this->m_channelPub->BasicPublish(
                    m_basicInfo.exchange,
                    m_basicInfo.routingkey,
-                   AmqpClient::BasicMessage::Create(strMsg));
+                   msgPtr);
     }
     catch(std::exception& e)
     {
@@ -41,9 +48,10 @@ bool CRabbitMQ::start_recv_msg(llong timeOutMsec)
 {
     m_timeOutMsec = timeOutMsec;
 
-    bool bSuc = this->init_rabbit_mq();
+    bool bSuc = this->init_rabbit_mq(RECV);
     if (bSuc == false)
     {
+        printf("init_rabbit_mq_error!\n");
         return false;
     }
 
@@ -52,14 +60,16 @@ bool CRabbitMQ::start_recv_msg(llong timeOutMsec)
     if (this->m_work_thread == NULL)
     {
         this->m_bwork = false;
+        printf("init_rabbit_mq_error!\n");
         return false;
     }
     this->m_work_thread->detach();
 
-    struct timeb t1;
-    ftime(&t1);
-    m_startTime = t1.time * 1000 + t1.millitm;
+    struct timeb tb;
+    ftime(&tb);
+    m_startTime = tb.time * 1000 + tb.millitm;
 
+    printf("init_rabbit_mq_OK!\n");
     return true;
 }
 
@@ -80,45 +90,63 @@ void CRabbitMQ::stop_recv_msg()
     }
 }
 
-bool CRabbitMQ::init_rabbit_mq()
+bool CRabbitMQ::init_rabbit_mq(WORK_TYPE flag)
 {
-    if(nullptr != this->m_channel)
-    {
-        return true;
-    }
     try
     {
-        this->m_channel = AmqpClient::Channel::Create(m_basicInfo.m_mq_host
-                                                      ,m_basicInfo.m_mq_port
-                                                      ,m_basicInfo.m_mq_username
-                                                      ,m_basicInfo.m_mq_passwd
-                                                      ,m_basicInfo.m_mq_vhost);
-        if (this->m_channel == nullptr)
+        if(RECV == flag)
         {
-            return false;
+            if(nullptr == this->m_channelRecv)
+            {
+                this->m_channelRecv = AmqpClient::Channel::Create(m_basicInfo.m_mq_host
+                                                              ,m_basicInfo.m_mq_port
+                                                              ,m_basicInfo.m_mq_username
+                                                              ,m_basicInfo.m_mq_passwd
+                                                              ,m_basicInfo.m_mq_vhost);
+                if (this->m_channelRecv)
+                {
+                    this->m_channelRecv->DeclareExchange(m_basicInfo.exchange, m_basicInfo.type, false, true, false);
+                    std::string queue_name =  this->m_channelRecv->DeclareQueue(m_basicInfo.queue, false, true, false, false);
+                    this->m_channelRecv->BindQueue(queue_name, m_basicInfo.exchange, m_basicInfo.routingkey);
+                    this->m_str_consumer = this->m_channelRecv->BasicConsume(queue_name, "", true,  false, false, 1);
+                }
+            }
         }
-
-        this->m_channel->DeclareExchange(m_basicInfo.exchange, m_basicInfo.type, false, true, false);
-        std::string queue_name =  this->m_channel->DeclareQueue(m_basicInfo.queue, false, true, false, false);
-        this->m_channel->BindQueue(queue_name, m_basicInfo.exchange, m_basicInfo.routingkey);
-        this->m_str_consumer = this->m_channel->BasicConsume(queue_name, "", true,  false, false, 1);
+        else if(PUB == flag)
+        {
+            if(nullptr == this->m_channelPub)
+            {
+                this->m_channelPub = AmqpClient::Channel::Create(m_basicInfo.m_mq_host
+                                                              ,m_basicInfo.m_mq_port
+                                                              ,m_basicInfo.m_mq_username
+                                                              ,m_basicInfo.m_mq_passwd
+                                                              ,m_basicInfo.m_mq_vhost);
+                if (this->m_channelPub)
+                {
+                    this->m_channelPub->DeclareExchange(m_basicInfo.exchange, m_basicInfo.type, false, true, false);
+                    std::string queue_name =  this->m_channelPub->DeclareQueue(m_basicInfo.queue, false, true, false, false);
+                    this->m_channelPub->BindQueue(queue_name, m_basicInfo.exchange, m_basicInfo.routingkey);
+                }
+            }
+        }
     }
-    catch(std::exception &e)
+    catch(std::exception& ex)
     {
         printf("init rabbit error!\n");
-        printf(e.what());
+        printf(ex.what());
         printf("\n");
         return false;
     }
+
     return true;
 }
 
 bool CRabbitMQ::exit_rabbit_mq()
 {
-    if(this->m_channel != NULL  && this->m_str_consumer.length() > 0)
+    if(this->m_channelRecv != NULL  && this->m_str_consumer.length() > 0)
     {
-        this->m_channel->BasicCancel(this->m_str_consumer);
-        this->m_channel = NULL;
+        this->m_channelRecv->BasicCancel(this->m_str_consumer);
+        this->m_channelRecv = NULL;
         this->m_str_consumer.clear();
     }
     return true;
@@ -128,6 +156,9 @@ void CRabbitMQ::recv_work_thread()
 {
     while(this->m_bwork)
     {
+        struct timeb tb;
+        ftime(&tb);
+        llong nowMsec = tb.time * 1000 + tb.millitm;
         if (this->m_bwork == false)
         {
             break;
@@ -135,11 +166,7 @@ void CRabbitMQ::recv_work_thread()
 
         if(m_timeOutMsec > 0)
         {
-            struct timeb tb;
-            ftime(&tb);
-            llong nowSec = tb.time * 1000 + tb.millitm;
-            printf("--%ld\n",nowSec);
-            if(nowSec - m_startTime > m_timeOutMsec)
+            if(nowMsec - m_startTime > m_timeOutMsec)
             {
                 printf("----rabbit_client_recv TIME_OUT ----\n");
                 this->m_bwork = false;
@@ -148,7 +175,7 @@ void CRabbitMQ::recv_work_thread()
         }
 
         AmqpClient::Envelope::ptr_t envelope;
-        if (this->m_channel->BasicConsumeMessage(this->m_str_consumer, envelope, 100) == false)
+        if (this->m_channelRecv->BasicConsumeMessage(this->m_str_consumer, envelope, 50) == false)
         {
             continue;
         }
@@ -156,7 +183,10 @@ void CRabbitMQ::recv_work_thread()
         std::string strRoutingKey = envelope->RoutingKey();
         std::string buffer   = envelope->Message()->Body();
 
-        this->m_channel->BasicAck(envelope);
-        printf("%s\n",buffer.c_str());
+        this->m_channelRecv->BasicAck(envelope);
+        if(buffer.length() > 0)
+        {
+            printf("nowMsec:(%lld)--buffer recv:%s\n",nowMsec,buffer.c_str());
+        }
     }
 }
